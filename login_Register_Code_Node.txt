@@ -1,0 +1,198 @@
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+###########################################################
+
+.env/
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=root
+DB_DATABASE=auth_system
+JWT_SECRET=42f842d3e623b3d0706a217ec89ae24108155e9d134dfcf28e8128bd78953ab9
+PORT=5000
+
+#########################################################################
+
+db.js/
+const mysql = require('mysql2');
+require('dotenv').config();
+
+const pool = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_DATABASE,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
+
+module.exports = pool.promise();
+
+
+##############################################################################
+
+middlewares/authMiddleware.js/
+
+const jwt = require('jsonwebtoken');
+
+const authMiddleware = (req, res, next) => {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+        return res.status(401).json({ message: 'No token, authorization denied' });
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded.user;
+        next();
+    } catch (err) {
+        res.status(401).json({ message: 'Token is not valid' });
+    }
+};
+
+module.exports = authMiddleware;
+
+##############################################################
+
+controller/authController.js
+
+const db = require('../config/db');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const register = async (req, res) => {
+    try {
+        const { username, email, password } = req.body;
+        
+        // Check if user exists
+        const [existingUser] = await db.query(
+            'SELECT * FROM users WHERE email = ? OR username = ?', 
+            [email, username]
+        );
+        
+        if (existingUser.length > 0) {
+            return res.status(400).json({ message: 'User already exists' });
+        }
+        
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        // Create user
+        const [result] = await db.query(
+            'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
+            [username, email, hashedPassword]
+        );
+        
+        // Create token
+        const payload = { user: { id: result.insertId } };
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
+        
+        res.status(201).json({ token });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
+    }
+};
+
+const login = async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        // Check if user exists
+        const [user] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        
+        if (user.length === 0) {
+            return res.status(400).json({ message: 'Invalid credentials' });
+        }
+        
+        // Compare passwords
+        const isMatch = await bcrypt.compare(password, user[0].password);
+        
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Invalid credentials' });
+        }
+        
+        // Create token
+        const payload = { user: { id: user[0].id } };
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
+        
+        res.json({ token });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
+    }
+};
+
+const getUser = async (req, res) => {
+    try {
+        const [user] = await db.query('SELECT id, username, email FROM users WHERE id = ?', [req.user.id]);
+        
+        if (user.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        res.json(user[0]);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
+    }
+};
+
+const getAllUsers = async (req, res) => {
+    try {
+        // Fetch all users (excluding passwords for security)
+        const [users] = await db.query(
+            'SELECT id, username, email FROM users' // 👈 No WHERE clause
+        );
+        
+        if (users.length === 0) {
+            return res.status(404).json({ message: 'No users found' });
+        }
+        
+        res.json(users); // Return all users
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server error');
+    }
+};
+
+module.exports = { register, login, getUser, getAllUsers };
+
+######################################################################################
+
+app.js
+
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const authRoutes = require('./routes/authRoutes');
+const path = require('path'); 
+dotenv.config();
+
+const app = express();
+
+// Middleware
+app.use(cors({
+     origin: 'http://localhost:3000', // Your React app's origin
+    credentials: true
+}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).send('Something broke!');
+});
+
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
